@@ -1,0 +1,508 @@
+/**
+ * Manutenção da Casa (Home Upkeep): controle de manutenções recorrentes da casa.
+ * A planilha guarda os dados. Este script agora funciona só como uma API JSON
+ * (chamada via fetch() pelo app, que é hospedado separadamente no GitHub Pages
+ * para poder ser instalado de verdade no Android e no iOS).
+ * Um gatilho diário continua enviando alertas por e-mail, sem relação com o hosting do app.
+ *
+ * Primeira vez: rode setup() uma vez pelo editor do Apps Script.
+ */
+
+const SHEET_TASKS = 'Tasks';
+const SHEET_HISTORY = 'History';
+const SHEET_SETTINGS = 'Settings';
+const UNITS = ['days', 'weeks', 'months', 'years']; // códigos técnicos — não traduzir
+const WHO = ['DIY', 'Pro']; // códigos técnicos — não traduzir
+
+// Chave simples para evitar que alguém descubra a URL do script por acaso e consiga ler/editar
+// os dados. Não é segurança forte (fica visível no código do app), só uma trava mínima.
+// Tem que ser IDÊNTICA à API_KEY em app.js do app hospedado no GitHub Pages.
+const API_KEY = 'EAymKiJNwWXufQInoUQjJxl7hVin';
+
+// Colunas da aba Tasks (1-based). A coluna G (Próximo Vencimento) é uma fórmula para a planilha ficar legível;
+// o script nunca escreve nela e calcula as datas de vencimento por conta própria.
+const C = { ID: 1, TASK: 2, CAT: 3, EVERY: 4, UNIT: 5, LAST: 6, NEXT: 7, WHO: 8, NOTES: 9, ACTIVE: 10 };
+
+const NEXT_DUE_FORMULA =
+  '={"Next Due";ARRAYFORMULA(IF((B2:B="")+(F2:F="")+(D2:D=""),,' +
+  'IF(E2:E="days",F2:F+D2:D,IF(E2:E="weeks",F2:F+7*D2:D,' +
+  'IF(E2:E="years",EDATE(F2:F,12*D2:D),EDATE(F2:F,D2:D))))))}';
+
+// [tarefa, categoria, a cada, unidade (técnica, não traduzir), quem (técnico, não traduzir), notas]
+const SEED_TASKS = [
+  ['Despejar vinagre no dreno do ar-condicionado', 'Ar-condicionado', 1, 'months', 'DIY', 'Cerca de 1 xícara de vinagre branco na abertura de acesso do dreno, perto da unidade interna. Evita entupimento por mofo/algas.'],
+  ['Trocar o filtro do ar-condicionado', 'Ar-condicionado', 2, 'months', 'DIY', 'A cada 1-3 meses. Tamanho do filtro: ______'],
+  ['Fazer a manutenção profissional do ar-condicionado', 'Ar-condicionado', 1, 'years', 'Pro', 'Serpentinas, gás refrigerante, bandeja de dreno. Fornecedor: ______'],
+  ['Quebrar o sal do amaciador de água', 'Água', 1, 'months', 'DIY', 'Bata no sal com um macete para quebrar crostas, depois complete o nível.'],
+  ['Limpeza profissional do tanque do amaciador de água', 'Água', 1, 'years', 'Pro', 'Fornecedor: ______'],
+  ['Fazer a purga do aquecedor de água', 'Água', 6, 'months', 'DIY', 'Desligue a energia/gás e drene pela válvula inferior até a água sair limpa.'],
+  ['Lubrificar a porta da garagem', 'Garagem', 6, 'months', 'DIY', 'Spray de silicone ou lítio nas dobradiças, roldanas e molas. Não aplique nos trilhos.'],
+  ['Testar a reversão automática da porta da garagem', 'Garagem', 6, 'months', 'DIY', 'Coloque uma tábua sob a porta; ela deve reverter ao tocá-la.'],
+  ['Trocar o filtro de água da geladeira', 'Cozinha', 6, 'months', 'DIY', 'Modelo do filtro: ______'],
+  ['Limpar o filtro da lava-louças', 'Cozinha', 1, 'months', 'DIY', ''],
+  ['Limpar o triturador de resíduos', 'Cozinha', 1, 'months', 'DIY', 'Gelo + sal grosso, depois cascas de cítricos.'],
+  ['Limpar os filtros da coifa', 'Cozinha', 6, 'months', 'DIY', 'Água quente e desengordurante, ou na lava-louças.'],
+  ['Testar detectores de fumaça e monóxido de carbono', 'Segurança', 1, 'months', 'DIY', ''],
+  ['Trocar as pilhas dos detectores de fumaça', 'Segurança', 1, 'years', 'DIY', ''],
+  ['Verificar o extintor de incêndio', 'Segurança', 1, 'years', 'DIY', 'Manômetro na faixa verde, pino intacto, dentro da validade.'],
+  ['Testar as tomadas com DR/GFCI', 'Segurança', 3, 'months', 'DIY', 'Aperte TEST e depois RESET nas tomadas da cozinha, banheiro e áreas externas.'],
+  ['Limpar o duto da secadora', 'Lavanderia', 1, 'years', 'Pro', 'O duto completo até a saída externa, não só o filtro de fiapos.'],
+  ['Verificar vazamentos embaixo das pias', 'Encanamento', 3, 'months', 'DIY', ''],
+  ['Inspecionar o rejunte/silicone de banheiras, boxes e pias', 'Encanamento', 6, 'months', 'DIY', 'Reaplique onde estiver rachado ou mofado.'],
+  ['Dedetização', 'Área externa', 3, 'months', 'Pro', 'Fornecedor: ______'],
+  ['Inspecionar o telhado e limpar as calhas', 'Área externa', 1, 'years', 'Pro', ''],
+  ['Verificar o sistema de irrigação', 'Área externa', 1, 'years', 'DIY', 'Aspersores quebrados, vazamentos, cobertura.'],
+];
+
+const DEFAULT_SETTINGS = [
+  ['alert_emails', '', 'E-mails que recebem alertas, separados por vírgula'],
+  ['people', '', 'Nomes para o histórico: pares e-mail=Nome, separados por vírgula (ex: voce@gmail.com=Felipe, dela@gmail.com=Renata) — não usado mais para o app (que agora usa um seletor de nome), só fica aqui de referência'],
+  ['daily_alert_hour', 7, 'Hora (0-23) da checagem diária. Depois de alterar, use o menu Manutenção da Casa > Reinstalar alertas diários'],
+  ['weekly_digest_day', 'Monday', 'Dia do resumo semanal'],
+  ['digest_window_days', 7, 'O resumo semanal lista tarefas que vencem dentro desses dias'],
+  ['remind_overdue_every_days', 3, 'Repete lembretes de atraso a cada N dias (0 = só no resumo semanal)'],
+  ['pro_heads_up_days', 14, 'Para tarefas profissionais, envia e-mail com essa antecedência para dar tempo de contratar alguém'],
+  ['app_url', '', 'URL do app no GitHub Pages, para os e-mails linkarem para o app'],
+];
+
+/* ───────────────────────── Setup ───────────────────────── */
+
+function setup() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  ss.setSpreadsheetLocale('pt_BR');
+  ss.setSpreadsheetTimeZone('America/New_York');
+  PropertiesService.getScriptProperties().setProperty('SHEET_ID', ss.getId());
+
+  const tasks = getOrCreateSheet_(ss, SHEET_TASKS);
+  if (lastDataRow_(tasks) <= 1 && String(tasks.getRange(1, 1).getValue()) === '') {
+    tasks.getRange(1, 1, 1, 6).setValues([['ID', 'Tarefa', 'Categoria', 'A cada', 'Unidade', 'Feito em']]);
+    tasks.getRange(1, C.NEXT).setFormula(NEXT_DUE_FORMULA);
+    tasks.getRange(1, C.WHO, 1, 3).setValues([['Quem', 'Notas', 'Ativo']]);
+    const rows = SEED_TASKS.map((t, i) => ['T' + String(i + 1).padStart(3, '0'), t[0], t[1], t[2], t[3], '']);
+    tasks.getRange(2, 1, rows.length, 6).setValues(rows);
+    tasks.getRange(2, C.WHO, rows.length, 3).setValues(SEED_TASKS.map(t => [t[4], t[5], true]));
+  }
+  formatTasks_(tasks);
+
+  const hist = getOrCreateSheet_(ss, SHEET_HISTORY);
+  if (hist.getLastRow() === 0) {
+    hist.getRange(1, 1, 1, 6).setValues([['Registrado em', 'ID da Tarefa', 'Tarefa', 'Data Feita', 'Feito por', 'Nota']]);
+    hist.setFrozenRows(1);
+    hist.getRange(1, 1, 1, 6).setFontWeight('bold');
+    hist.getRange('A2:A').setNumberFormat('dd/mm/yyyy hh:mm');
+    hist.getRange('D2:D').setNumberFormat('dd/mm/yyyy');
+  }
+
+  const set = getOrCreateSheet_(ss, SHEET_SETTINGS);
+  if (set.getLastRow() === 0) {
+    set.getRange(1, 1, 1, 3).setValues([['Chave', 'Valor', 'Notas']]);
+    set.getRange(2, 1, DEFAULT_SETTINGS.length, 3).setValues(DEFAULT_SETTINGS);
+    set.setFrozenRows(1);
+    set.getRange(1, 1, 1, 3).setFontWeight('bold');
+    set.setColumnWidth(1, 200); set.setColumnWidth(2, 320); set.setColumnWidth(3, 520);
+  }
+
+  installTriggers();
+  Logger.log('Setup concluído. Próximo passo: preencha a aba Settings, depois Deploy > New deployment > Web app.');
+}
+
+// Atualiza os textos visíveis (cabeçalhos, tarefas, notas) de uma planilha já configurada
+// para português, sem mexer nos códigos técnicos (Unidade, Quem) nem nos valores que você
+// já preencheu em Settings (e-mails, URL do app etc.).
+function localizeToPTBR() {
+  const ss = openSS_();
+  ss.setSpreadsheetLocale('pt_BR');
+
+  const tasks = ss.getSheetByName(SHEET_TASKS);
+  tasks.getRange(1, 1, 1, 10).setValues([['ID', 'Tarefa', 'Categoria', 'A cada', 'Unidade', 'Feito em', 'Próximo Vencimento', 'Quem', 'Notas', 'Ativo']]);
+  const n = SEED_TASKS.length;
+  tasks.getRange(2, C.TASK, n, 1).setValues(SEED_TASKS.map(t => [t[0]]));
+  tasks.getRange(2, C.CAT, n, 1).setValues(SEED_TASKS.map(t => [t[1]]));
+  tasks.getRange(2, C.NOTES, n, 1).setValues(SEED_TASKS.map(t => [t[5]]));
+
+  const hist = ss.getSheetByName(SHEET_HISTORY);
+  if (hist) hist.getRange(1, 1, 1, 6).setValues([['Registrado em', 'ID da Tarefa', 'Tarefa', 'Data Feita', 'Feito por', 'Nota']]);
+
+  const set = ss.getSheetByName(SHEET_SETTINGS);
+  if (set) {
+    set.getRange(1, 1, 1, 3).setValues([['Chave', 'Valor', 'Notas']]);
+    set.getRange(2, 3, DEFAULT_SETTINGS.length, 1).setValues(DEFAULT_SETTINGS.map(s => [s[2]]));
+  }
+  Logger.log('Planilha traduzida para PT-BR (cabeçalhos, tarefas, categorias e notas).');
+}
+
+function installTriggers() {
+  const ss = openSS_();
+  const hour = Math.min(23, Math.max(0, Number(getSettings_(ss).daily_alert_hour) || 7));
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'runDailyAlerts')
+    .forEach(t => ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger('runDailyAlerts').timeBased().everyDays(1).atHour(hour)
+    .inTimezone(ss.getSpreadsheetTimeZone()).create();
+}
+
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('Manutenção da Casa')
+    .addItem('Enviar resumo por e-mail agora (teste)', 'sendSummaryNow')
+    .addItem('Reinstalar alertas diários', 'installTriggers')
+    .addItem('Traduzir planilha para PT-BR', 'localizeToPTBR')
+    .addToUi();
+}
+
+function getOrCreateSheet_(ss, name) {
+  let sh = ss.getSheetByName(name);
+  if (sh) return sh;
+  const sheets = ss.getSheets();
+  if (name === SHEET_TASKS && sheets.length === 1 && sheets[0].getLastRow() === 0) {
+    return sheets[0].setName(name);
+  }
+  return ss.insertSheet(name);
+}
+
+function formatTasks_(sh) {
+  sh.setFrozenRows(1);
+  sh.getRange(1, 1, 1, 10).setFontWeight('bold');
+  sh.getRange('F2:G').setNumberFormat('dd/mm/yyyy');
+  sh.getRange('E2:E').setDataValidation(
+    SpreadsheetApp.newDataValidation().requireValueInList(UNITS, true).setAllowInvalid(false).build());
+  sh.getRange('H2:H').setDataValidation(
+    SpreadsheetApp.newDataValidation().requireValueInList(WHO, true).build());
+  sh.getRange('J2:J').setDataValidation(SpreadsheetApp.newDataValidation().requireCheckbox().build());
+  sh.setColumnWidth(C.TASK, 300);
+  sh.setColumnWidth(C.NOTES, 380);
+}
+
+/* ───────────────────────── API JSON (chamada via fetch pelo app no GitHub Pages) ─────────────────────────
+ * GET  ?action=getData&key=...
+ * GET  ?action=getHistory&id=...&key=...
+ * POST corpo texto (Content-Type: text/plain, para não disparar CORS preflight) com JSON:
+ *      {action:'markDone', key, id, dateIso, note, who}
+ *      {action:'saveTask', key, who, task:{...}}
+ */
+
+// O Apps Script web app não aceita fetch()/XHR entre domínios (o Google responde com
+// 503 só para chamadas CORS — funciona normalmente navegando direto na URL, mas não
+// quando chamado via fetch do GitHub Pages). Por isso o app usa duas técnicas sem CORS:
+// - Leituras (GET): JSONP via tag <script>, com ?callback=nomeDaFuncao.
+// - Escritas (POST): um <form> escondido enviado para um <iframe> escondido; a página
+//   devolvida roda dentro do iframe e manda o resultado pro app via postMessage.
+
+function doGet(e) {
+  const p = (e && e.parameter) || {};
+  return withApi_(p.key, () => {
+    if (p.action === 'getData') return getData();
+    if (p.action === 'getHistory') return getHistory(p.id);
+    throw new Error('Ação desconhecida: ' + p.action);
+  }, p.callback);
+}
+
+function doPost(e) {
+  const p = (e && e.parameter) || {};
+  let body = {};
+  if (e && e.postData && e.postData.contents) {
+    // Chamada programática direta (JSON no corpo), se algum dia for útil.
+    try { body = JSON.parse(e.postData.contents); } catch (err) { body = {}; }
+  } else {
+    // Veio do <form> escondido: campos simples em e.parameter.
+    body = p;
+    if (body.task && typeof body.task === 'string') {
+      try { body.task = JSON.parse(body.task); } catch (err) { /* mantém string, saveTask valida */ }
+    }
+  }
+  return withApi_(body.key || p.key, () => {
+    if (body.action === 'markDone') return markDone(body.id, body.dateIso, body.note, body.who);
+    if (body.action === 'saveTask') return saveTask(body.task || {}, body.who);
+    throw new Error('Ação desconhecida: ' + body.action);
+  }, p.callback);
+}
+
+function withApi_(key, fn, callback) {
+  let result;
+  try {
+    if (key !== API_KEY) {
+      result = { ok: false, error: 'Não autorizado.' };
+    } else {
+      result = { ok: true, data: fn() };
+    }
+  } catch (err) {
+    result = { ok: false, error: (err && err.message) || String(err) };
+  }
+  return output_(result, callback);
+}
+
+// callback presente → JSONP (leituras, via <script src>).
+// sem callback → HTML com postMessage (escritas, via <form>/<iframe> escondidos).
+function output_(obj, callback) {
+  const json = JSON.stringify(obj);
+  if (callback && /^[\w$.]+$/.test(String(callback))) {
+    return ContentService.createTextOutput(callback + '(' + json + ')')
+      .setMimeType(ContentService.MimeType.JAVASCRIPT);
+  }
+  const safeJson = json.replace(/</g, '\\u003c').replace(/-->/g, '--\\u003e');
+  return HtmlService.createHtmlOutput('<script>parent.postMessage(' + safeJson + ', "*");<' + '/script>');
+}
+
+function getData() {
+  const ss = openSS_();
+  const tz = ss.getSpreadsheetTimeZone();
+  const tasks = readTasks_(ss).map(t => { const o = Object.assign({}, t); delete o.row; return o; });
+  return { today: todayIso_(tz), tasks: tasks };
+}
+
+function markDone(id, dateIso, note, who) {
+  const ss = openSS_();
+  const tz = ss.getSpreadsheetTimeZone();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateIso))) throw new Error('Escolha uma data válida.');
+  if (dateIso > todayIso_(tz)) throw new Error('A data não pode ser no futuro.');
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const t = readTasks_(ss).find(x => x.id === id);
+    if (!t) throw new Error('Tarefa não encontrada. Atualize a página.');
+    const sh = ss.getSheetByName(SHEET_TASKS);
+    // Registrar uma data antiga (para atualizar o histórico) nunca atrasa a contagem.
+    if (!t.lastDone || dateIso >= t.lastDone) sh.getRange(t.row, C.LAST).setValue(dateIso);
+    ss.getSheetByName(SHEET_HISTORY).appendRow([new Date(), id, t.task, dateIso, String(who || 'Alguém').slice(0, 60), String(note || '').slice(0, 500)]);
+  } finally {
+    lock.releaseLock();
+  }
+  return getData();
+}
+
+function saveTask(input, who) {
+  const ss = openSS_();
+  const task = String(input.task || '').trim();
+  const every = Math.floor(Number(input.every));
+  const unit = String(input.unit || '');
+  const taskWho = WHO.indexOf(input.who) >= 0 ? input.who : '';
+  const lastDone = String(input.lastDone || '');
+  if (!task) throw new Error('Dê um nome à tarefa.');
+  if (!(every >= 1)) throw new Error('O campo "A cada" deve ser 1 ou mais.');
+  if (UNITS.indexOf(unit) < 0) throw new Error('Escolha dias, semanas, meses ou anos.');
+  if (lastDone && !/^\d{4}-\d{2}-\d{2}$/.test(lastDone)) throw new Error('A data informada não é válida.');
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const sh = ss.getSheetByName(SHEET_TASKS);
+    let row;
+    let id = String(input.id || '');
+    const isNew = !id;
+    if (id) {
+      const t = readTasks_(ss).find(x => x.id === id);
+      if (!t) throw new Error('Tarefa não encontrada. Atualize a página.');
+      row = t.row;
+    } else {
+      id = 'T' + Utilities.getUuid().replace(/-/g, '').slice(0, 8);
+      row = lastDataRow_(sh) + 1;
+      if (row > sh.getMaxRows()) sh.insertRowsAfter(sh.getMaxRows(), 20);
+      sh.getRange(row, C.ID).setValue(id);
+    }
+    sh.getRange(row, C.TASK, 1, 4).setValues([[task, String(input.category || '').trim(), every, unit]]);
+    sh.getRange(row, C.LAST).setValue(lastDone);
+    sh.getRange(row, C.WHO, 1, 3).setValues([[taskWho, String(input.notes || ''), input.active !== false]]);
+    if (isNew) {
+      ss.getSheetByName(SHEET_HISTORY).appendRow([new Date(), id, task, '', String(who || 'Alguém').slice(0, 60), 'Tarefa criada']);
+    }
+  } finally {
+    lock.releaseLock();
+  }
+  return getData();
+}
+
+function getHistory(id) {
+  const ss = openSS_();
+  const tz = ss.getSpreadsheetTimeZone();
+  const sh = ss.getSheetByName(SHEET_HISTORY);
+  const n = sh.getLastRow() - 1;
+  if (n < 1) return [];
+  return sh.getRange(2, 1, n, 6).getValues()
+    .filter(r => String(r[1]) === String(id))
+    .map(r => ({ date: toIso_(r[3], tz), by: String(r[4] || ''), note: String(r[5] || '') }))
+    .sort((a, b) => (a.date < b.date ? 1 : -1))
+    .slice(0, 25);
+}
+
+/* ───────────────────────── Alertas por e-mail ───────────────────────── */
+
+function runDailyAlerts() { sendAlerts_(false); }   // chamado pelo gatilho diário
+function sendSummaryNow() { sendAlerts_(true); }    // item de menu, para teste
+
+function sendAlerts_(forceSummary) {
+  const ss = openSS_();
+  const s = getSettings_(ss);
+  const to = String(s.alert_emails || '').split(',').map(x => x.trim()).filter(Boolean);
+  if (!to.length) { Logger.log('Nenhum e-mail em alert_emails na aba Settings.'); return; }
+
+  const tz = ss.getSpreadsheetTimeZone();
+  const tasks = readTasks_(ss).filter(t => t.active && t.nextDue).sort((a, b) => a.daysUntil - b.daysUntil);
+  const weekday = Utilities.formatDate(new Date(), tz, 'EEEE').toLowerCase();
+  const isSummary = forceSummary || weekday === String(s.weekly_digest_day || 'Monday').trim().toLowerCase();
+  const windowDays = Number(s.digest_window_days) || 7;
+  const overdueEvery = Number(s.remind_overdue_every_days) || 0;
+  const proLead = Number(s.pro_heads_up_days) || 0;
+
+  const overdue = tasks.filter(t => t.daysUntil < 0);
+  const today = tasks.filter(t => t.daysUntil === 0);
+  const sections = [];
+
+  if (isSummary) {
+    const soon = tasks.filter(t => t.daysUntil > 0 && t.daysUntil <= windowDays);
+    const book = tasks.filter(t => t.who === 'Pro' && t.daysUntil > windowDays && t.daysUntil <= proLead);
+    if (overdue.length) sections.push(['Atrasadas', overdue]);
+    if (today.length) sections.push(['Vencem hoje', today]);
+    if (soon.length) sections.push(['Chegando nos próximos ' + windowDays + ' dias', soon]);
+    if (book.length) sections.push(['Hora de contratar um profissional', book]);
+    if (!sections.length && !forceSummary) return;
+  } else {
+    const nudge = overdueEvery > 0 ? overdue.filter(t => (-t.daysUntil) % overdueEvery === 0) : [];
+    const book = proLead > 0 ? tasks.filter(t => t.who === 'Pro' && t.daysUntil === proLead) : [];
+    if (today.length) sections.push(['Vencem hoje', today]);
+    if (nudge.length) sections.push(['Ainda atrasadas', nudge]);
+    if (book.length) sections.push(['Hora de contratar um profissional', book]);
+    if (!sections.length) return;
+  }
+
+  const count = sections.reduce((n, sec) => n + sec[1].length, 0);
+  const subject = isSummary
+    ? (count ? 'Manutenção da casa nesta semana: ' + count + ' tarefa' + (count === 1 ? '' : 's') : 'Manutenção da casa: nada pendente esta semana')
+    : 'Manutenção da casa: ' + sections.map(sec => sec[1].length + ' ' + sec[0].toLowerCase()).join(', ');
+
+  MailApp.sendEmail({
+    to: to.join(','),
+    subject: subject,
+    name: 'Manutenção da Casa',
+    htmlBody: emailHtml_(sections, s.app_url || safeUrl_(), tz),
+  });
+}
+
+function emailHtml_(sections, url, tz) {
+  const esc = v => String(v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const label = t => t.daysUntil < 0 ? 'atrasada há ' + (-t.daysUntil) + 'd'
+    : t.daysUntil === 0 ? 'hoje' : 'em ' + t.daysUntil + 'd · ' + prettyDate_(t.nextDue, tz);
+  let html = '<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#1c1c1a;max-width:560px">';
+  if (!sections.length) html += '<p>Nada pendente no momento. 👍</p>';
+  sections.forEach(sec => {
+    html += '<h3 style="margin:20px 0 6px;font-size:15px">' + esc(sec[0]) + '</h3>' +
+      '<table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse">';
+    sec[1].forEach(t => {
+      html += '<tr><td style="padding:8px 0;border-bottom:1px solid #eee">' + esc(t.task) +
+        (t.who === 'Pro' ? ' <span style="color:#6d6b64;font-size:12px">(Pro)</span>' : '') +
+        '</td><td style="padding:8px 0;border-bottom:1px solid #eee;text-align:right;color:#6d6b64;white-space:nowrap">' +
+        esc(label(t)) + '</td></tr>';
+    });
+    html += '</table>';
+  });
+  if (url) {
+    html += '<p style="margin-top:24px"><a href="' + esc(url) + '" style="background:#2e6b5b;color:#fff;' +
+      'text-decoration:none;padding:10px 16px;border-radius:8px;display:inline-block">Abrir Manutenção da Casa</a></p>';
+  }
+  return html + '</div>';
+}
+
+function safeUrl_() {
+  try { return ScriptApp.getService().getUrl() || ''; } catch (e) { return ''; }
+}
+
+/* ───────────────────────── Funções auxiliares de dados ───────────────────────── */
+
+function openSS_() {
+  const id = PropertiesService.getScriptProperties().getProperty('SHEET_ID');
+  if (id) return SpreadsheetApp.openById(id);
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) throw new Error('Rode setup() primeiro.');
+  return ss;
+}
+
+function readTasks_(ss) {
+  const sh = ss.getSheetByName(SHEET_TASKS);
+  const tz = ss.getSpreadsheetTimeZone();
+  const last = lastDataRow_(sh);
+  if (last < 2) return [];
+  const today = todayIso_(tz);
+  const vals = sh.getRange(2, 1, last - 1, 10).getValues();
+  const out = [];
+  vals.forEach((r, i) => {
+    const task = String(r[C.TASK - 1] || '').trim();
+    if (!task) return;
+    let id = String(r[C.ID - 1] || '').trim();
+    if (!id) { // linha adicionada direto na planilha: cria um ID
+      id = 'T' + Utilities.getUuid().replace(/-/g, '').slice(0, 8);
+      sh.getRange(i + 2, C.ID).setValue(id);
+    }
+    const every = Math.floor(Number(r[C.EVERY - 1])) || 0;
+    const unit = UNITS.indexOf(String(r[C.UNIT - 1]).trim().toLowerCase()) >= 0
+      ? String(r[C.UNIT - 1]).trim().toLowerCase() : 'months';
+    const lastDone = toIso_(r[C.LAST - 1], tz);
+    const nextDue = lastDone && every ? addInterval_(lastDone, every, unit) : '';
+    const activeRaw = r[C.ACTIVE - 1];
+    out.push({
+      row: i + 2,
+      id: id,
+      task: task,
+      category: String(r[C.CAT - 1] || ''),
+      every: every,
+      unit: unit,
+      lastDone: lastDone,
+      nextDue: nextDue,
+      daysUntil: nextDue ? daysBetween_(today, nextDue) : null,
+      who: String(r[C.WHO - 1] || ''),
+      notes: String(r[C.NOTES - 1] || ''),
+      active: !(activeRaw === false || String(activeRaw).toUpperCase() === 'FALSE'),
+    });
+  });
+  return out;
+}
+
+// Última linha com nome de tarefa (coluna B). Ignora a fórmula de Próximo Vencimento e a caixa de seleção.
+function lastDataRow_(sh) {
+  const n = sh.getMaxRows();
+  const v = sh.getRange(1, C.TASK, n, 1).getValues();
+  for (let i = n - 1; i >= 0; i--) if (String(v[i][0]).trim() !== '') return i + 1;
+  return 1;
+}
+
+function getSettings_(ss) {
+  const sh = ss.getSheetByName(SHEET_SETTINGS);
+  const out = {};
+  if (!sh || sh.getLastRow() < 2) return out;
+  sh.getRange(2, 1, sh.getLastRow() - 1, 2).getValues().forEach(r => {
+    if (r[0]) out[String(r[0]).trim()] = r[1];
+  });
+  return out;
+}
+
+/* ───────────────────────── Funções de data (strings ISO, à prova de fuso) ───────────────────────── */
+
+function todayIso_(tz) { return Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd'); }
+
+function toIso_(v, tz) {
+  if (Object.prototype.toString.call(v) === '[object Date]' && !isNaN(v)) return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
+  const s = String(v || '').trim();
+  return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : '';
+}
+
+function isoUTC_(d) { return d.toISOString().slice(0, 10); }
+
+function addInterval_(iso, n, unit) {
+  const p = iso.split('-').map(Number);
+  if (unit === 'days' || unit === 'weeks') {
+    return isoUTC_(new Date(Date.UTC(p[0], p[1] - 1, p[2]) + (unit === 'weeks' ? 7 * n : n) * 864e5));
+  }
+  const total = (p[1] - 1) + (unit === 'years' ? 12 * n : n);
+  const y = p[0] + Math.floor(total / 12);
+  const m = ((total % 12) + 12) % 12;
+  const dim = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  return isoUTC_(new Date(Date.UTC(y, m, Math.min(p[2], dim))));
+}
+
+function daysBetween_(a, b) {
+  const pa = a.split('-').map(Number), pb = b.split('-').map(Number);
+  return Math.round((Date.UTC(pb[0], pb[1] - 1, pb[2]) - Date.UTC(pa[0], pa[1] - 1, pa[2])) / 864e5);
+}
+
+function prettyDate_(iso, tz) {
+  const p = iso.split('-').map(Number);
+  return Utilities.formatDate(new Date(Date.UTC(p[0], p[1] - 1, p[2], 12)), 'UTC', 'dd/MM');
+}
