@@ -96,10 +96,10 @@ function render(d){
   const cats = Array.from(new Set(all.map(t => t.category).filter(Boolean))).sort();
   $('#cats').innerHTML = cats.map(c => '<option value="' + esc(c) + '">').join('');
 
-  const chipDefs = [{code:'All', label:'Tudo'}, {code:'DIY', label:'DIY'}, {code:'Pro', label:'Pro'}]
-    .concat(cats.map(c => ({code: c, label: c})));
-  if (chipDefs.findIndex(c => c.code === filter) < 0) filter = 'All';
-  $('#chips').innerHTML = chipDefs.map(c => '<button class="chip' + (c.code === filter ? ' on' : '') + '" data-chip="' + esc(c.code) + '">' + esc(c.label) + '</button>').join('');
+  const filterDefs = [{code:'All', label:'Tudo'}, {code:'DIY', label:'DIY'}, {code:'Pro', label:'Pro'}]
+      .concat(cats.map(c => ({code: c, label: c})));
+    if (filterDefs.findIndex(c => c.code === filter) < 0) filter = 'All';
+    $('#filterSelect').innerHTML = filterDefs.map(c => '<option value="' + esc(c.code) + '"' + (c.code === filter ? ' selected' : '') + '>' + esc(c.label) + '</option>').join('');
 
   const pass = t => filter === 'All' || t.who === filter || t.category === filter;
   const active = all.filter(t => t.active && pass(t));
@@ -179,12 +179,11 @@ function setWho(name){
 }
 
 document.addEventListener('click', e => {
-  const el = e.target.closest('[data-done],[data-open],[data-chip],[data-close],[data-who],#archToggle,#addBtn,#whoBtn,#whoOtherSave');
+const el = e.target.closest('[data-done],[data-open],[data-close],[data-who],#archToggle,#addBtn,#whoBtn,#whoOtherSave');
   if (e.target.classList.contains('overlay')) return closeAll();
   if (!el) return;
   if (el.dataset.done) openDone(el.dataset.done);
   else if (el.dataset.open) openEdit(el.dataset.open);
-  else if (el.dataset.chip) { filter = el.dataset.chip; render(); }
   else if (el.dataset.who) setWho(el.dataset.who);
   else if (el.id === 'whoOtherSave') setWho($('#whoOther').value);
   else if (el.hasAttribute('data-close')) closeAll();
@@ -193,6 +192,7 @@ document.addEventListener('click', e => {
   else if (el.id === 'whoBtn') open($('#whoSheet'));
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeAll(); });
+document.addEventListener('change', e => { if (e.target.id === 'filterSelect') { filter = e.target.value; render(); } });
 
 $('#doneSave').addEventListener('click', () => {
   const date = $('#doneDate').value;
