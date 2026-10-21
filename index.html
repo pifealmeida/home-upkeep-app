@@ -36,10 +36,12 @@ h1{font-size:28px;margin:0;letter-spacing:-.02em}
 .sub{color:var(--muted);font-size:14px;margin-top:2px}
 .whoBtn{background:none;border:0;color:var(--muted);font:inherit;font-size:13px;text-decoration:underline;
   cursor:pointer;padding:6px 0;white-space:nowrap}
-.chips{display:flex;gap:8px;margin:14px 0 4px;overflow-x:auto;padding-bottom:4px}
-.chip{flex:none;border:1px solid var(--line);background:var(--card);color:var(--ink);font:inherit;font-size:14px;
-  padding:6px 12px;border-radius:999px}
-.chip.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.filterRow{margin:14px 0 4px}
+  .filterSelect{width:auto;min-height:0;display:inline-block;border:1px solid var(--line);background:var(--card);
+                  color:var(--ink);font:inherit;font-size:14px;padding:8px 32px 8px 12px;border-radius:999px;
+                  -webkit-appearance:none;appearance:none;
+                  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+                  background-repeat:no-repeat;background-position:right 12px center}
 h2{font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin:22px 4px 8px;font-weight:700}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 12px 12px 14px;
   display:flex;gap:12px;align-items:center;margin-bottom:8px;box-shadow:var(--shadow)}
@@ -102,8 +104,9 @@ textarea{min-height:80px;resize:vertical}
     </div>
     <button class="whoBtn" id="whoBtn"></button>
   </header>
-  <div class="chips" id="chips"></div>
-  <div id="list"><div class="loading">Carregando tarefas…</div></div>
+    <div class="filterRow"><select class="filterSelect" id="filterSelect">
+    </select></div>
+    <div id="list"><div class="loading">Carregando tarefas…</div></div>
 </div>
 
 <button class="btn fab" id="addBtn" aria-label="Adicionar tarefa">+</button>
